@@ -1,0 +1,8 @@
+streamlit
+torch
+silero
+ebooklib
+beautifulsoup4
+lxml
+numpy
+imageio-ffmpeg
