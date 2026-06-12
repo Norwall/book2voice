@@ -9,7 +9,7 @@ from audiobook_tts.settings import SAMPLE_RATES, SILERO_VOICES, GenerationSettin
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate Russian audiobook chapters with Silero TTS.")
-    parser.add_argument("input", type=Path, help="Path to .epub or .txt book")
+    parser.add_argument("input", type=Path, help="Path to .epub, .txt, or .fb2 book")
     parser.add_argument("--out", type=Path, default=None, help="Output directory")
     parser.add_argument("--merge", action="store_true", help="Also create book.mp3")
     parser.add_argument("--voice", choices=SILERO_VOICES, default="baya")
@@ -21,7 +21,7 @@ def main() -> int:
         "--txt-chapter-chars",
         type=int,
         default=12000,
-        help="Fallback chapter size for TXT files without chapter headings",
+        help="Fallback chapter size for TXT/FB2 files without chapter markup",
     )
     parser.add_argument("--threads", type=int, default=4, help="Torch CPU threads")
     args = parser.parse_args()

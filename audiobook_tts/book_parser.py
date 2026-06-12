@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,8 @@ def parse_book(path: Path, txt_chapter_chars: int = 12000) -> ParsedBook:
         return parse_txt(path, txt_chapter_chars=txt_chapter_chars)
     if suffix == ".epub":
         return parse_epub(path)
+    if suffix == ".fb2":
+        return parse_fb2(path, txt_chapter_chars=txt_chapter_chars)
     raise ValueError(f"Unsupported file format: {suffix}")
 
 
@@ -104,6 +107,50 @@ def parse_epub(path: Path) -> ParsedBook:
     return ParsedBook(title=title or path.stem, chapters=chapters)
 
 
+def parse_fb2(path: Path, txt_chapter_chars: int = 12000) -> ParsedBook:
+    try:
+        root = ET.fromstring(path.read_bytes())
+    except ET.ParseError as exc:
+        raise ValueError(f"The FB2 file is not valid XML: {exc}") from exc
+
+    title = _fb2_book_title(root) or path.stem
+    body = _fb2_main_body(root)
+    if body is None:
+        raise ValueError("The FB2 file does not contain a readable body")
+
+    sections = [
+        child
+        for child in list(body)
+        if _local_name(child.tag) == "section" and _fb2_element_text(child)
+    ]
+    chapters: list[Chapter] = []
+
+    if sections:
+        for section in sections:
+            text = clean_text("\n\n".join(_fb2_text_blocks(section)))
+            if text:
+                chapters.append(
+                    Chapter(
+                        index=len(chapters) + 1,
+                        title=_fb2_section_title(section) or f"Chapter {len(chapters) + 1}",
+                        text=text,
+                    )
+                )
+    else:
+        text = clean_text("\n\n".join(_fb2_text_blocks(body)))
+        parts = hard_split_text(text, txt_chapter_chars)
+        chapters = [
+            Chapter(index=index + 1, title=f"Part {index + 1}", text=part)
+            for index, part in enumerate(parts)
+        ]
+
+    chapters = _drop_empty_chapters(chapters)
+    if not chapters:
+        raise ValueError("The FB2 file does not contain readable chapters")
+
+    return ParsedBook(title=title, chapters=chapters)
+
+
 def _split_by_heading_lines(lines: list[str], heading_indexes: list[int]) -> list[Chapter]:
     chapters: list[Chapter] = []
     first_heading = heading_indexes[0]
@@ -132,3 +179,66 @@ def _drop_empty_chapters(chapters: list[Chapter]) -> list[Chapter]:
     if not result:
         raise ValueError("No readable text was found")
     return result
+
+
+def _fb2_book_title(root: ET.Element) -> str:
+    description = _first_child(root, "description")
+    title_info = _first_child(description, "title-info") if description is not None else None
+    book_title = _first_child(title_info, "book-title") if title_info is not None else None
+    return _fb2_element_text(book_title) if book_title is not None else ""
+
+
+def _fb2_main_body(root: ET.Element) -> ET.Element | None:
+    bodies = [child for child in list(root) if _local_name(child.tag) == "body"]
+    for body in bodies:
+        if body.attrib.get("name", "").lower() != "notes":
+            return body
+    return bodies[0] if bodies else None
+
+
+def _fb2_section_title(section: ET.Element) -> str:
+    title = _first_child(section, "title")
+    return _fb2_element_text(title) if title is not None else ""
+
+
+def _fb2_text_blocks(element: ET.Element) -> list[str]:
+    ignored_tags = {"binary", "image"}
+    block_tags = {"p", "v", "subtitle", "text-author"}
+    tag = _local_name(element.tag)
+    if tag in ignored_tags:
+        return []
+    if tag in block_tags:
+        text = _fb2_element_text(element)
+        return [text] if text else []
+
+    blocks: list[str] = []
+    if element.text and tag not in {"FictionBook", "description", "title-info", "document-info"}:
+        text = clean_text(element.text)
+        if text:
+            blocks.append(text)
+    for child in list(element):
+        blocks.extend(_fb2_text_blocks(child))
+        if child.tail:
+            tail = clean_text(child.tail)
+            if tail:
+                blocks.append(tail)
+    return blocks
+
+
+def _fb2_element_text(element: ET.Element | None) -> str:
+    if element is None:
+        return ""
+    return clean_text(" ".join(part.strip() for part in element.itertext() if part.strip()))
+
+
+def _first_child(element: ET.Element | None, name: str) -> ET.Element | None:
+    if element is None:
+        return None
+    for child in list(element):
+        if _local_name(child.tag) == name:
+            return child
+    return None
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag

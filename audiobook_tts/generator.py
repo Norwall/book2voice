@@ -19,6 +19,11 @@ from .text_utils import default_title_from_path, safe_name, split_text_for_tts
 from .tts_engine import SileroTtsEngine
 
 ProgressCallback = Callable[["ProgressEvent"], None]
+CancelCallback = Callable[[], bool]
+
+
+class GenerationCancelled(RuntimeError):
+    """Raised when audiobook generation is cancelled by the caller."""
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,7 @@ def generate_audiobook(
     settings: GenerationSettings | None = None,
     txt_chapter_chars: int = 12000,
     progress: ProgressCallback | None = None,
+    cancel_requested: CancelCallback | None = None,
 ) -> GenerationResult:
     settings = settings or GenerationSettings()
     settings.validate()
@@ -58,49 +64,70 @@ def generate_audiobook(
     target_dir = output_dir or make_default_output_dir(input_path, parsed.title)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    _emit(progress, "parse", f"Found {len(chapters)} chapters", total_chapters=len(chapters))
-    _emit(progress, "model", "Loading Silero model")
-    engine = SileroTtsEngine(
-        model_id=settings.model_id,
-        torch_threads=settings.torch_threads,
-    )
-
     chapter_files: list[Path] = []
-    with tempfile.TemporaryDirectory(prefix="_audiobook_", dir=str(target_dir)) as temp_dir:
-        temp_path = Path(temp_dir)
-        for index, chapter in enumerate(chapters, start=1):
-            output_mp3 = target_dir / f"{index:03d}.mp3"
-            output_wav = temp_path / f"{index:03d}.wav"
-            _emit(
-                progress,
-                "chapter",
-                f"Generating {index:03d}: {chapter.title}",
-                chapter_index=index,
-                total_chapters=len(chapters),
-            )
-            _write_chapter_wav(engine, chapter, output_wav, settings)
-            convert_wav_to_mp3(
-                output_wav,
-                output_mp3,
-                bitrate=settings.mp3_bitrate,
-                speed=settings.speech_speed,
-            )
-            chapter_files.append(output_mp3)
-            _emit(
-                progress,
-                "chapter_done",
-                f"Saved {output_mp3.name}",
-                chapter_index=index,
-                total_chapters=len(chapters),
-                output_path=output_mp3,
-            )
-
     merged_file = None
-    if merge:
-        merged_file = target_dir / "book.mp3"
-        _emit(progress, "merge", "Merging chapters into one MP3")
-        concat_mp3_files(chapter_files, merged_file)
-        _emit(progress, "merge_done", "Saved book.mp3", output_path=merged_file)
+    try:
+        _raise_if_cancelled(cancel_requested)
+        _emit(progress, "parse", f"Found {len(chapters)} chapters", total_chapters=len(chapters))
+        _raise_if_cancelled(cancel_requested)
+        _emit(progress, "model", "Loading Silero model")
+        engine = SileroTtsEngine(
+            model_id=settings.model_id,
+            torch_threads=settings.torch_threads,
+        )
+        _raise_if_cancelled(cancel_requested)
+
+        with tempfile.TemporaryDirectory(prefix="_audiobook_", dir=str(target_dir)) as temp_dir:
+            temp_path = Path(temp_dir)
+            for index, chapter in enumerate(chapters, start=1):
+                _raise_if_cancelled(cancel_requested)
+                output_mp3 = target_dir / f"{index:03d}.mp3"
+                output_wav = temp_path / f"{index:03d}.wav"
+                _emit(
+                    progress,
+                    "chapter",
+                    f"Generating {index:03d}: {chapter.title}",
+                    chapter_index=index,
+                    total_chapters=len(chapters),
+                )
+                _write_chapter_wav(
+                    engine,
+                    chapter,
+                    output_wav,
+                    settings,
+                    cancel_requested=cancel_requested,
+                )
+                _raise_if_cancelled(cancel_requested)
+                convert_wav_to_mp3(
+                    output_wav,
+                    output_mp3,
+                    bitrate=settings.mp3_bitrate,
+                    speed=settings.speech_speed,
+                )
+                chapter_files.append(output_mp3)
+                _emit(
+                    progress,
+                    "chapter_done",
+                    f"Saved {output_mp3.name}",
+                    chapter_index=index,
+                    total_chapters=len(chapters),
+                    output_path=output_mp3,
+                )
+
+        if merge:
+            merged_file = target_dir / "book.mp3"
+            _raise_if_cancelled(cancel_requested)
+            _emit(progress, "merge", "Merging chapters into one MP3")
+            concat_mp3_files(chapter_files, merged_file)
+            _emit(progress, "merge_done", "Saved book.mp3", output_path=merged_file)
+    except GenerationCancelled:
+        _emit(
+            progress,
+            "cancelled",
+            "Audiobook generation cancelled",
+            output_path=target_dir,
+        )
+        raise
 
     _emit(progress, "done", "Audiobook generation finished", output_path=target_dir)
     return GenerationResult(
@@ -109,6 +136,11 @@ def generate_audiobook(
         merged_file=merged_file,
         chapters_count=len(chapter_files),
     )
+
+
+def _raise_if_cancelled(cancel_requested: CancelCallback | None) -> None:
+    if cancel_requested and cancel_requested():
+        raise GenerationCancelled("Audiobook generation was cancelled")
 
 
 def make_default_output_dir(input_path: Path, book_title: str | None = None) -> Path:
@@ -122,6 +154,8 @@ def _write_chapter_wav(
     chapter: Chapter,
     wav_path: Path,
     settings: GenerationSettings,
+    *,
+    cancel_requested: CancelCallback | None = None,
 ) -> None:
     chunks = split_text_for_tts(chapter.text, settings.max_chunk_chars)
     if not chunks:
@@ -133,6 +167,7 @@ def _write_chapter_wav(
         wav_file.setsampwidth(2)
         wav_file.setframerate(settings.sample_rate)
         for chunk_index, chunk in enumerate(chunks):
+            _raise_if_cancelled(cancel_requested)
             audio = engine.synthesize(
                 chunk,
                 voice=settings.voice,

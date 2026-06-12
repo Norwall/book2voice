@@ -1,5 +1,5 @@
 """Local audiobook generation helpers."""
 
-from .generator import GenerationResult, GenerationSettings, generate_audiobook
+from .generator import GenerationCancelled, GenerationResult, GenerationSettings, generate_audiobook
 
-__all__ = ["GenerationResult", "GenerationSettings", "generate_audiobook"]
+__all__ = ["GenerationCancelled", "GenerationResult", "GenerationSettings", "generate_audiobook"]
