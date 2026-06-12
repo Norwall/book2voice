@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-from .text_utils import clean_text, decode_text_bytes, hard_split_text
+from .text_utils import clean_text, decode_text_bytes
 
 HEADING_RE = re.compile(
     r"^\s*(глава|часть|книга|раздел)\b.{0,100}$|^\s*(пролог|эпилог)\b.{0,80}$",
@@ -52,11 +52,7 @@ def parse_txt(path: Path, txt_chapter_chars: int = 12000) -> ParsedBook:
     if len(heading_indexes) >= 2:
         chapters = _split_by_heading_lines(lines, heading_indexes)
     else:
-        parts = hard_split_text(text, txt_chapter_chars)
-        chapters = [
-            Chapter(index=index + 1, title=f"Part {index + 1}", text=part)
-            for index, part in enumerate(parts)
-        ]
+        chapters = [Chapter(index=1, title=path.stem, text=text)]
 
     return ParsedBook(title=path.stem, chapters=_drop_empty_chapters(chapters))
 
@@ -138,11 +134,7 @@ def parse_fb2(path: Path, txt_chapter_chars: int = 12000) -> ParsedBook:
                 )
     else:
         text = clean_text("\n\n".join(_fb2_text_blocks(body)))
-        parts = hard_split_text(text, txt_chapter_chars)
-        chapters = [
-            Chapter(index=index + 1, title=f"Part {index + 1}", text=part)
-            for index, part in enumerate(parts)
-        ]
+        chapters = [Chapter(index=1, title=title, text=text)]
 
     chapters = _drop_empty_chapters(chapters)
     if not chapters:

@@ -14,6 +14,7 @@ class GenerationSettings:
     max_chunk_chars: int = 850
     pause_ms: int = 350
     speech_speed: float = 1.0
+    target_chapter_minutes: int = 20
     mp3_bitrate: str = "128k"
     torch_threads: int = 4
     model_id: str = SILERO_MODEL_ID
@@ -29,5 +30,7 @@ class GenerationSettings:
             raise ValueError("pause_ms must be between 0 and 3000")
         if not 0.5 <= self.speech_speed <= 2.0:
             raise ValueError("speech_speed must be between 0.5 and 2.0")
+        if not 1 <= self.target_chapter_minutes <= 240:
+            raise ValueError("target_chapter_minutes must be between 1 and 240")
         if self.torch_threads < 1:
             raise ValueError("torch_threads must be positive")

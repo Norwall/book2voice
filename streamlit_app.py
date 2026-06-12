@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 import queue
 import shutil
 import tempfile
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +37,7 @@ class GenerationJob:
     status: str = ""
     result: GenerationResult | None = None
     error: str | None = None
+    error_details: str | None = None
     cleanup_error: str | None = None
     cancelled: bool = False
     stop_requested: bool = False
@@ -48,7 +51,6 @@ def _run_generation_job(
     *,
     merge: bool,
     settings: GenerationSettings,
-    txt_chapter_chars: int,
 ) -> None:
     def on_progress(event: ProgressEvent) -> None:
         job.events.put(("progress", event))
@@ -59,7 +61,6 @@ def _run_generation_job(
             output_dir=output_dir,
             merge=merge,
             settings=settings,
-            txt_chapter_chars=txt_chapter_chars,
             progress=on_progress,
             cancel_requested=job.cancel_event.is_set,
         )
@@ -74,7 +75,9 @@ def _run_generation_job(
             else:
                 job.events.put(("cleanup_done", output_dir))
     except Exception as exc:
-        job.events.put(("error", str(exc)))
+        logging.exception("Audiobook generation failed")
+        message = str(exc).strip() or type(exc).__name__
+        job.events.put(("error", {"message": message, "details": traceback.format_exc()}))
     else:
         job.events.put(("done", result))
     finally:
@@ -115,7 +118,11 @@ def _drain_job_events(job: GenerationJob) -> None:
             job.cleanup_error = str(payload)
             job.messages.append("Не удалось удалить папку результата")
         elif event_type == "error":
-            job.error = str(payload)
+            if isinstance(payload, dict):
+                job.error = str(payload.get("message") or "Неизвестная ошибка")
+                job.error_details = str(payload.get("details") or "")
+            else:
+                job.error = str(payload) or "Неизвестная ошибка"
             job.done = True
             job.status = "Ошибка генерации"
             job.messages.append(job.status)
@@ -147,7 +154,6 @@ def _start_generation_job(
     add_timestamp: bool,
     merge: bool,
     settings: GenerationSettings,
-    txt_chapter_chars: int,
     delete_output_on_cancel: bool,
 ) -> GenerationJob:
     input_temp_dir = Path(tempfile.mkdtemp(prefix="audiobook_upload_"))
@@ -176,7 +182,6 @@ def _start_generation_job(
         kwargs={
             "merge": merge,
             "settings": settings,
-            "txt_chapter_chars": txt_chapter_chars,
         },
         daemon=True,
     )
@@ -212,12 +217,12 @@ with st.sidebar:
     speed = st.slider("Скорость", 0.7, 2.0, 1.0, 0.05, disabled=is_running)
     pause_ms = st.slider("Пауза между фрагментами, мс", 0, 1500, 150, 50, disabled=is_running)
     chunk_chars = st.slider("Размер фрагмента TTS, символы", 400, 1500, 850, 50, disabled=is_running)
-    txt_chapter_chars = st.number_input(
-        "Размер главы для файлов без заголовков",
-        min_value=3000,
-        max_value=50000,
-        value=12000,
-        step=1000,
+    chapter_minutes = st.number_input(
+        "Длительность главы, минут",
+        min_value=1,
+        max_value=240,
+        value=20,
+        step=1,
         disabled=is_running,
     )
     threads = st.number_input("Потоки CPU", min_value=1, max_value=16, value=4, step=1, disabled=is_running)
@@ -257,6 +262,7 @@ if start and uploaded is not None and not is_running:
         max_chunk_chars=int(chunk_chars),
         pause_ms=int(pause_ms),
         speech_speed=float(speed),
+        target_chapter_minutes=int(chapter_minutes),
         torch_threads=int(threads),
     )
     job = _start_generation_job(
@@ -267,7 +273,6 @@ if start and uploaded is not None and not is_running:
         add_timestamp=add_timestamp,
         merge=merge,
         settings=settings,
-        txt_chapter_chars=int(txt_chapter_chars),
         delete_output_on_cancel=stop_action == "Удалить папку результата",
     )
     st.session_state.generation_job = job
@@ -283,6 +288,9 @@ if job is not None:
         st.info("Остановка запрошена. Генерация завершится на ближайшей безопасной точке.")
     if job.error:
         st.error(job.error)
+        if job.error_details:
+            with st.expander("Подробности ошибки"):
+                st.code(job.error_details)
     elif job.cleanup_error:
         st.error(f"Не удалось удалить папку результата: {job.cleanup_error}")
     elif job.cancelled:

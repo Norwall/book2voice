@@ -6,6 +6,9 @@ from pathlib import Path
 WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?…])\s+")
 SAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+TTS_CHARS_PER_SECOND = 14.0
+SENTENCE_END_CHARS = ".!?…"
+SENTENCE_TRAILING_CHARS = "\"'»”)]}"
 
 
 def clean_text(text: str) -> str:
@@ -74,7 +77,65 @@ def split_text_for_tts(text: str, max_chars: int) -> list[str]:
         flush_current()
 
     flush_current()
-    return chunks
+    return _merge_nonverbal_tts_chunks(chunks, max_chars)
+
+
+def split_text_into_sentences(text: str) -> list[str]:
+    text = clean_text(text)
+    if not text:
+        return []
+
+    raw_sentences: list[str] = []
+    for paragraph in text.split("\n\n"):
+        for sentence in SENTENCE_BOUNDARY_RE.split(paragraph):
+            sentence = sentence.strip()
+            if sentence:
+                raw_sentences.append(sentence)
+    return _merge_heading_fragments(raw_sentences)
+
+
+def _merge_heading_fragments(sentences: list[str]) -> list[str]:
+    result: list[str] = []
+    pending_prefix: list[str] = []
+
+    for sentence in sentences:
+        if _ends_sentence(sentence):
+            if pending_prefix:
+                sentence = f"{' '.join(pending_prefix)} {sentence}".strip()
+                pending_prefix = []
+            result.append(sentence)
+        else:
+            pending_prefix.append(sentence)
+
+    if pending_prefix:
+        suffix = " ".join(pending_prefix).strip()
+        if result:
+            result[-1] = f"{result[-1]} {suffix}".strip()
+        else:
+            result.append(suffix)
+
+    return result
+
+
+def _ends_sentence(value: str) -> bool:
+    stripped = value.strip().rstrip(SENTENCE_TRAILING_CHARS)
+    return bool(stripped) and stripped[-1] in SENTENCE_END_CHARS
+
+
+def estimate_tts_seconds(
+    text: str,
+    *,
+    max_chunk_chars: int,
+    pause_ms: int,
+    speech_speed: float,
+) -> float:
+    chunks = split_text_for_tts(text, max_chunk_chars)
+    if not chunks:
+        return 0.0
+
+    speech_seconds = sum(len(chunk) for chunk in chunks) / TTS_CHARS_PER_SECOND
+    pause_seconds = max(0, len(chunks) - 1) * pause_ms / 1000
+    return (speech_seconds + pause_seconds) / speech_speed
 
 
 def hard_split_text(text: str, max_chars: int) -> list[str]:
@@ -94,3 +155,40 @@ def hard_split_text(text: str, max_chars: int) -> list[str]:
     if remaining:
         parts.append(remaining)
     return parts
+
+
+def _merge_nonverbal_tts_chunks(chunks: list[str], max_chars: int) -> list[str]:
+    merged: list[str] = []
+    pending_prefix: list[str] = []
+
+    for raw_chunk in chunks:
+        chunk = raw_chunk.strip()
+        if not chunk:
+            continue
+        if not _has_letters(chunk):
+            pending_prefix.append(chunk)
+            continue
+
+        if pending_prefix:
+            prefix = " ".join(pending_prefix).strip()
+            candidate = f"{prefix} {chunk}".strip()
+            if len(candidate) <= max_chars or len(prefix) <= 40 or not merged:
+                chunk = candidate
+            else:
+                merged[-1] = f"{merged[-1]} {prefix}".strip()
+            pending_prefix = []
+
+        merged.append(chunk)
+
+    if pending_prefix:
+        suffix = " ".join(pending_prefix).strip()
+        if merged:
+            merged[-1] = f"{merged[-1]} {suffix}".strip()
+        else:
+            merged.append(suffix)
+
+    return merged
+
+
+def _has_letters(value: str) -> bool:
+    return any(char.isalpha() for char in value)

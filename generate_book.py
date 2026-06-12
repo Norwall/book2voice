@@ -17,11 +17,12 @@ def main() -> int:
     parser.add_argument("--speed", type=float, default=1.0, help="Speech speed, 0.5..2.0")
     parser.add_argument("--pause-ms", type=int, default=350, help="Pause between TTS chunks")
     parser.add_argument("--chunk-chars", type=int, default=850, help="Max chars per TTS chunk")
+    parser.add_argument("--chapter-minutes", type=int, default=20, help="Target MP3 chapter length in minutes")
     parser.add_argument(
         "--txt-chapter-chars",
         type=int,
         default=12000,
-        help="Fallback chapter size for TXT/FB2 files without chapter markup",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--threads", type=int, default=4, help="Torch CPU threads")
     args = parser.parse_args()
@@ -32,6 +33,7 @@ def main() -> int:
         max_chunk_chars=args.chunk_chars,
         pause_ms=args.pause_ms,
         speech_speed=args.speed,
+        target_chapter_minutes=args.chapter_minutes,
         torch_threads=args.threads,
     )
 

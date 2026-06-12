@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import wave
 from dataclasses import dataclass
@@ -15,11 +16,18 @@ from .audio import (
 )
 from .book_parser import Chapter, parse_book
 from .settings import GenerationSettings
-from .text_utils import default_title_from_path, safe_name, split_text_for_tts
+from .text_utils import (
+    default_title_from_path,
+    estimate_tts_seconds,
+    safe_name,
+    split_text_for_tts,
+    split_text_into_sentences,
+)
 from .tts_engine import SileroTtsEngine
 
 ProgressCallback = Callable[["ProgressEvent"], None]
 CancelCallback = Callable[[], bool]
+WHITESPACE_PREVIEW_RE = re.compile(r"\s+")
 
 
 class GenerationCancelled(RuntimeError):
@@ -57,7 +65,8 @@ def generate_audiobook(
     settings.validate()
     input_path = input_path.resolve()
     parsed = parse_book(input_path, txt_chapter_chars=txt_chapter_chars)
-    chapters = parsed.chapters
+    source_chapters = parsed.chapters
+    chapters = _split_chapters_by_target_duration(source_chapters, settings)
     if len(chapters) > 999:
         raise ValueError("The book has more than 999 chapters; numeric filenames would overflow")
 
@@ -68,7 +77,12 @@ def generate_audiobook(
     merged_file = None
     try:
         _raise_if_cancelled(cancel_requested)
-        _emit(progress, "parse", f"Found {len(chapters)} chapters", total_chapters=len(chapters))
+        _emit(
+            progress,
+            "parse",
+            f"Prepared {len(chapters)} audio chapters from {len(source_chapters)} source chapters",
+            total_chapters=len(chapters),
+        )
         _raise_if_cancelled(cancel_requested)
         _emit(progress, "model", "Loading Silero model")
         engine = SileroTtsEngine(
@@ -149,6 +163,55 @@ def make_default_output_dir(input_path: Path, book_title: str | None = None) -> 
     return Path("outputs") / f"{title}_{stamp}"
 
 
+def _split_chapters_by_target_duration(
+    source_chapters: list[Chapter],
+    settings: GenerationSettings,
+) -> list[Chapter]:
+    target_seconds = settings.target_chapter_minutes * 60
+    result: list[Chapter] = []
+    current_sentences: list[str] = []
+    current_text = ""
+    current_title = ""
+
+    def append_current() -> None:
+        nonlocal current_sentences, current_text, current_title
+        text = current_text.strip()
+        if text:
+            result.append(
+                Chapter(
+                    index=len(result) + 1,
+                    title=current_title or f"Part {len(result) + 1}",
+                    text=text,
+                )
+            )
+        current_sentences = []
+        current_text = ""
+        current_title = ""
+
+    for source_chapter in source_chapters:
+        for sentence in split_text_into_sentences(source_chapter.text):
+            candidate_text = f"{current_text} {sentence}".strip() if current_text else sentence
+            candidate_seconds = estimate_tts_seconds(
+                candidate_text,
+                max_chunk_chars=settings.max_chunk_chars,
+                pause_ms=settings.pause_ms,
+                speech_speed=settings.speech_speed,
+            )
+            if current_sentences and candidate_seconds > target_seconds:
+                append_current()
+                candidate_text = sentence
+
+            if not current_sentences:
+                current_title = source_chapter.title
+            current_sentences.append(sentence)
+            current_text = candidate_text
+
+    append_current()
+    if not result:
+        raise ValueError("No readable text was found")
+    return result
+
+
 def _write_chapter_wav(
     engine: SileroTtsEngine,
     chapter: Chapter,
@@ -166,15 +229,24 @@ def _write_chapter_wav(
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
         wav_file.setframerate(settings.sample_rate)
-        for chunk_index, chunk in enumerate(chunks):
+        for chunk_index, chunk in enumerate(chunks, start=1):
             _raise_if_cancelled(cancel_requested)
-            audio = engine.synthesize(
-                chunk,
-                voice=settings.voice,
-                sample_rate=settings.sample_rate,
-            )
+            try:
+                audio = engine.synthesize(
+                    chunk,
+                    voice=settings.voice,
+                    sample_rate=settings.sample_rate,
+                )
+            except Exception as exc:
+                error = str(exc).strip() or type(exc).__name__
+                preview = WHITESPACE_PREVIEW_RE.sub(" ", chunk).strip()[:160]
+                raise RuntimeError(
+                    f"TTS failed in chapter {chapter.index:03d} '{chapter.title}', "
+                    f"chunk {chunk_index}/{len(chunks)}: {error}. "
+                    f"Text: {preview!r}"
+                ) from exc
             wav_file.writeframes(audio_to_pcm16_bytes(audio))
-            if silence and chunk_index < len(chunks) - 1:
+            if silence and chunk_index < len(chunks):
                 wav_file.writeframes(silence)
 
 
