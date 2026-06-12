@@ -7,12 +7,14 @@ import tempfile
 import threading
 import time
 import traceback
+import wave
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
+from audiobook_tts.audio import audio_to_pcm16_bytes, convert_wav_to_mp3, silence_pcm16_bytes
 from audiobook_tts.generator import (
     GenerationCancelled,
     GenerationResult,
@@ -21,7 +23,19 @@ from audiobook_tts.generator import (
     make_default_output_dir,
 )
 from audiobook_tts.settings import SAMPLE_RATES, SILERO_VOICES, GenerationSettings
-from audiobook_tts.text_utils import safe_name
+from audiobook_tts.text_utils import safe_name, split_text_for_tts
+from audiobook_tts.tts_engine import SileroTtsEngine
+
+
+VOICE_PREVIEW_TEXT = (
+    "Глава 1. Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
+    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
+    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
+    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
+    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
+    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
+    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
+)
 
 
 @dataclass
@@ -190,10 +204,53 @@ def _start_generation_job(
     return job
 
 
+def _make_voice_preview_audio(settings: GenerationSettings) -> bytes:
+    settings.validate()
+    chunks = split_text_for_tts(VOICE_PREVIEW_TEXT, settings.max_chunk_chars)
+    if not chunks:
+        raise ValueError("Не удалось подготовить текст примера голоса")
+
+    engine = SileroTtsEngine(
+        model_id=settings.model_id,
+        torch_threads=settings.torch_threads,
+    )
+    silence = silence_pcm16_bytes(settings.sample_rate, settings.pause_ms)
+
+    with tempfile.TemporaryDirectory(prefix="audiobook_voice_preview_") as temp_dir:
+        temp_path = Path(temp_dir)
+        wav_path = temp_path / "preview.wav"
+        mp3_path = temp_path / "preview.mp3"
+        with wave.open(str(wav_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(settings.sample_rate)
+            for chunk_index, chunk in enumerate(chunks, start=1):
+                audio = engine.synthesize(
+                    chunk,
+                    voice=settings.voice,
+                    sample_rate=settings.sample_rate,
+                )
+                wav_file.writeframes(audio_to_pcm16_bytes(audio))
+                if silence and chunk_index < len(chunks):
+                    wav_file.writeframes(silence)
+
+        convert_wav_to_mp3(
+            wav_path,
+            mp3_path,
+            bitrate=settings.mp3_bitrate,
+            speed=settings.speech_speed,
+        )
+        return mp3_path.read_bytes()
+
+
 st.set_page_config(page_title="Озвучка книг", layout="wide")
 
 if "generation_job" not in st.session_state:
     st.session_state.generation_job = None
+if "voice_preview_audio" not in st.session_state:
+    st.session_state.voice_preview_audio = None
+if "voice_preview_signature" not in st.session_state:
+    st.session_state.voice_preview_signature = None
 
 job: GenerationJob | None = st.session_state.generation_job
 if job is not None:
@@ -217,6 +274,8 @@ with st.sidebar:
     speed = st.slider("Скорость", 0.7, 2.0, 1.0, 0.05, disabled=is_running)
     pause_ms = st.slider("Пауза между фрагментами, мс", 0, 1500, 150, 50, disabled=is_running)
     chunk_chars = st.slider("Размер фрагмента TTS, символы", 400, 1500, 850, 50, disabled=is_running)
+    preview = st.button("Прослушать пример голоса", disabled=is_running)
+    preview_output = st.empty()
     chapter_minutes = st.number_input(
         "Длительность главы, минут",
         min_value=1,
@@ -226,6 +285,37 @@ with st.sidebar:
         disabled=is_running,
     )
     threads = st.number_input("Потоки CPU", min_value=1, max_value=16, value=4, step=1, disabled=is_running)
+    preview_settings = GenerationSettings(
+        voice=voice,
+        sample_rate=int(sample_rate),
+        max_chunk_chars=int(chunk_chars),
+        pause_ms=int(pause_ms),
+        speech_speed=float(speed),
+        torch_threads=int(threads),
+    )
+    preview_signature = (
+        preview_settings.voice,
+        preview_settings.sample_rate,
+        preview_settings.max_chunk_chars,
+        preview_settings.pause_ms,
+        preview_settings.speech_speed,
+        preview_settings.torch_threads,
+    )
+    with preview_output:
+        if preview:
+            st.session_state.voice_preview_audio = None
+            st.session_state.voice_preview_signature = preview_signature
+            with st.spinner("Генерация примера голоса..."):
+                try:
+                    st.session_state.voice_preview_audio = _make_voice_preview_audio(preview_settings)
+                except Exception as exc:
+                    st.session_state.voice_preview_audio = None
+                    st.error(str(exc).strip() or type(exc).__name__)
+        if (
+            st.session_state.voice_preview_audio is not None
+            and st.session_state.voice_preview_signature == preview_signature
+        ):
+            st.audio(st.session_state.voice_preview_audio, format="audio/mp3")
     merge = st.checkbox("Склеить в одну книгу", value=False, disabled=is_running)
     stop_action = st.radio(
         "После нажатия «Стоп»",
