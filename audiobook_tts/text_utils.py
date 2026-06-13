@@ -1,14 +1,47 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?…])\s+")
 SAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+UNICODE_SPACE_RE = re.compile(
+    r"[\u00a0\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+"
+)
+TTS_DECORATION_RE = re.compile(r"[*\"'`]+")
 TTS_CHARS_PER_SECOND = 14.0
 SENTENCE_END_CHARS = ".!?…"
 SENTENCE_TRAILING_CHARS = "\"'»”)]}"
+TTS_TRANSLATION = str.maketrans(
+    {
+        "\u00ad": "",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\u2060": "",
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2015": "-",
+        "\u2212": "-",
+        "\u00ab": "",
+        "\u00bb": "",
+        "\u2018": "",
+        "\u2019": "",
+        "\u201a": "",
+        "\u201b": "",
+        "\u201c": "",
+        "\u201d": "",
+        "\u201e": "",
+        "\u201f": "",
+        "\u2039": "",
+        "\u203a": "",
+    }
+)
 
 
 def clean_text(text: str) -> str:
@@ -18,6 +51,15 @@ def clean_text(text: str) -> str:
         if line:
             lines.append(line)
     return "\n\n".join(lines).strip()
+
+
+def prepare_text_for_tts(text: str) -> str:
+    text = UNICODE_SPACE_RE.sub(" ", text.translate(TTS_TRANSLATION))
+    text = "".join(
+        char for char in text if not unicodedata.category(char).startswith("M")
+    )
+    text = TTS_DECORATION_RE.sub(" ", text)
+    return clean_text(text)
 
 
 def decode_text_bytes(data: bytes) -> str:
@@ -40,7 +82,7 @@ def default_title_from_path(path: Path) -> str:
 
 
 def split_text_for_tts(text: str, max_chars: int) -> list[str]:
-    text = clean_text(text)
+    text = prepare_text_for_tts(text)
     if not text:
         return []
 

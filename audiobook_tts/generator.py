@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import unicodedata
 import wave
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,7 +28,7 @@ from .tts_engine import SileroTtsEngine
 
 ProgressCallback = Callable[["ProgressEvent"], None]
 CancelCallback = Callable[[], bool]
-WHITESPACE_PREVIEW_RE = re.compile(r"\s+")
+WHITESPACE_PREVIEW_RE = re.compile(r"[ \t\r\n\f\v]+")
 
 
 class GenerationCancelled(RuntimeError):
@@ -239,7 +240,7 @@ def _write_chapter_wav(
                 )
             except Exception as exc:
                 error = str(exc).strip() or type(exc).__name__
-                preview = WHITESPACE_PREVIEW_RE.sub(" ", chunk).strip()[:160]
+                preview = _visible_error_preview(chunk)
                 raise RuntimeError(
                     f"TTS failed in chapter {chapter.index:03d} '{chapter.title}', "
                     f"chunk {chunk_index}/{len(chunks)}: {error}. "
@@ -248,6 +249,22 @@ def _write_chapter_wav(
             wav_file.writeframes(audio_to_pcm16_bytes(audio))
             if silence and chunk_index < len(chunks):
                 wav_file.writeframes(silence)
+
+
+def _visible_error_preview(text: str, max_chars: int = 160) -> str:
+    preview = WHITESPACE_PREVIEW_RE.sub(" ", text).strip()[:max_chars]
+    result: list[str] = []
+    for char in preview:
+        category = unicodedata.category(char)
+        if (
+            char == "\u00a0"
+            or category.startswith(("C", "M"))
+            or (char != " " and category.startswith("Z"))
+        ):
+            result.append(f"\\u{ord(char):04X}")
+        else:
+            result.append(char)
+    return "".join(result)
 
 
 def _emit(
