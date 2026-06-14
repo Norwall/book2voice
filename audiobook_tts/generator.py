@@ -29,6 +29,7 @@ from .tts_engine import SileroTtsEngine
 ProgressCallback = Callable[["ProgressEvent"], None]
 CancelCallback = Callable[[], bool]
 WHITESPACE_PREVIEW_RE = re.compile(r"[ \t\r\n\f\v]+")
+GENERATED_CHAPTER_FILE_RE = re.compile(r"^\d{3}\.mp3$")
 
 
 class GenerationCancelled(RuntimeError):
@@ -72,6 +73,7 @@ def generate_audiobook(
         raise ValueError("The book has more than 999 chapters; numeric filenames would overflow")
 
     target_dir = output_dir or make_default_output_dir(input_path, parsed.title)
+    _ensure_output_dir_available(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     chapter_files: list[Path] = []
@@ -162,6 +164,28 @@ def make_default_output_dir(input_path: Path, book_title: str | None = None) -> 
     title = safe_name(book_title or default_title_from_path(input_path), default="book")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return Path("outputs") / f"{title}_{stamp}"
+
+
+def _ensure_output_dir_available(target_dir: Path) -> None:
+    if target_dir.exists() and not target_dir.is_dir():
+        raise ValueError(f"Output path exists and is not a directory: {target_dir}")
+    if not target_dir.exists():
+        return
+
+    conflicts = sorted(
+        path.name
+        for path in target_dir.iterdir()
+        if path.is_file()
+        and (GENERATED_CHAPTER_FILE_RE.match(path.name) or path.name == "book.mp3")
+    )
+    if conflicts:
+        preview = ", ".join(conflicts[:5])
+        if len(conflicts) > 5:
+            preview = f"{preview}, ..."
+        raise ValueError(
+            "Output directory already contains generated audiobook files "
+            f"({preview}). Choose an empty folder or enable timestamped output."
+        )
 
 
 def _split_chapters_by_target_duration(

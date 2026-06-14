@@ -43,8 +43,7 @@ class SileroTtsEngine:
         if not model_path.exists():
             self._download_model(torch, model_url, model_path)
 
-        importer = torch.package.PackageImporter(str(model_path))
-        self.model = importer.load_pickle("tts_models", "model")
+        self.model = self._load_model_with_recovery(torch, model_url, model_path)
         self.model.to(self.device)
 
     def synthesize(self, text: str, *, voice: str, sample_rate: int):
@@ -82,6 +81,29 @@ class SileroTtsEngine:
             for stale in self.cache_dir.glob(f"{temp_path.name}*.partial"):
                 stale.unlink(missing_ok=True)
 
+    def _load_model_with_recovery(self, torch, model_url: str, model_path: Path):
+        try:
+            return self._load_model(model_path)
+        except Exception:
+            corrupt_path = (
+                _quarantine_corrupted_model(model_path)
+                if model_path.exists()
+                else model_path
+            )
+            try:
+                self._download_model(torch, model_url, model_path)
+                return self._load_model(model_path)
+            except Exception as retry_exc:
+                raise RuntimeError(
+                    "Silero model cache is corrupted and the model could not be "
+                    f"downloaded again. Corrupted file was moved to {corrupt_path}. "
+                    "Check internet connection or delete the .models/silero cache."
+                ) from retry_exc
+
+    def _load_model(self, model_path: Path):
+        importer = self.torch.package.PackageImporter(str(model_path))
+        return importer.load_pickle("tts_models", "model")
+
 
 def _filename_from_url(url: str) -> str:
     parsed = urlparse(url)
@@ -89,3 +111,10 @@ def _filename_from_url(url: str) -> str:
     if not name:
         raise ValueError(f"Cannot infer model filename from URL: {url}")
     return name
+
+
+def _quarantine_corrupted_model(model_path: Path) -> Path:
+    corrupt_path = model_path.with_name(f"{model_path.name}.corrupt")
+    corrupt_path.unlink(missing_ok=True)
+    model_path.replace(corrupt_path)
+    return corrupt_path

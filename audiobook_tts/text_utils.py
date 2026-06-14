@@ -14,6 +14,16 @@ TTS_DECORATION_RE = re.compile(r"[*\"'`]+")
 TTS_CHARS_PER_SECOND = 14.0
 SENTENCE_END_CHARS = ".!?…"
 SENTENCE_TRAILING_CHARS = "\"'»”)]}"
+TEXT_DECODINGS = (
+    "utf-8-sig",
+    "utf-8",
+    "utf-16",
+    "utf-16-le",
+    "utf-16-be",
+    "cp1251",
+    "windows-1251",
+    "koi8-r",
+)
 TTS_TRANSLATION = str.maketrans(
     {
         "\u00ad": "",
@@ -55,20 +65,62 @@ def clean_text(text: str) -> str:
 
 def prepare_text_for_tts(text: str) -> str:
     text = UNICODE_SPACE_RE.sub(" ", text.translate(TTS_TRANSLATION))
-    text = "".join(
-        char for char in text if not unicodedata.category(char).startswith("M")
-    )
+    text = "".join(_tts_safe_char(char) for char in text)
     text = TTS_DECORATION_RE.sub(" ", text)
     return clean_text(text)
 
 
 def decode_text_bytes(data: bytes) -> str:
-    for encoding in ("utf-8-sig", "utf-8", "cp1251", "windows-1251", "koi8-r"):
+    candidates: list[tuple[int, int, str]] = []
+    for index, encoding in enumerate(TEXT_DECODINGS):
         try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
+            text = data.decode(encoding)
+        except UnicodeError:
             continue
+        candidates.append((_decoded_text_score(text), -index, text))
+
+    if candidates:
+        return max(candidates)[2]
     return data.decode("utf-8", errors="replace")
+
+
+def _tts_safe_char(char: str) -> str:
+    category = unicodedata.category(char)
+    if category.startswith("M"):
+        return ""
+    if _is_emoji_or_symbol_pictograph(char):
+        return " "
+    if category.startswith("C"):
+        return char if char in "\n\r\t" else " "
+    return char
+
+
+def _is_emoji_or_symbol_pictograph(char: str) -> bool:
+    code = ord(char)
+    return (
+        0x1F000 <= code <= 0x1FAFF
+        or 0x2600 <= code <= 0x27BF
+        or 0xFE00 <= code <= 0xFE0F
+    )
+
+
+def _decoded_text_score(text: str) -> int:
+    score = 0
+    for char in text:
+        category = unicodedata.category(char)
+        if char == "\ufffd" or char == "\x00":
+            score -= 50
+        elif category.startswith("C") and char not in "\n\r\t":
+            score -= 20
+        elif char.isalpha():
+            score += 6
+            if "а" <= char.lower() <= "я" or char in "ёЁ":
+                score += 4
+        elif char.isdigit() or char.isspace() or category.startswith("P"):
+            score += 2
+        elif char.isprintable():
+            score += 1
+    return score
 
 
 def safe_name(value: str, default: str = "book") -> str:

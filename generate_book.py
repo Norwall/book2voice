@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from audiobook_tts.generator import ProgressEvent, generate_audiobook
@@ -43,14 +44,20 @@ def main() -> int:
             prefix = f"[{event.chapter_index:03d}/{event.total_chapters:03d}] "
         print(f"{prefix}{event.message}")
 
-    result = generate_audiobook(
-        args.input,
-        output_dir=args.out,
-        merge=args.merge,
-        settings=settings,
-        txt_chapter_chars=args.txt_chapter_chars,
-        progress=progress,
-    )
+    try:
+        result = generate_audiobook(
+            args.input,
+            output_dir=args.out,
+            merge=args.merge,
+            settings=settings,
+            txt_chapter_chars=args.txt_chapter_chars,
+            progress=progress,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        message = str(exc).strip() or type(exc).__name__
+        print(f"Error: {message}", file=sys.stderr)
+        return 1
+
     print(f"Done: {result.output_dir}")
     return 0
 

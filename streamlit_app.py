@@ -46,6 +46,7 @@ class GenerationJob:
     input_temp_dir: Path
     output_dir: Path
     delete_output_on_cancel: bool
+    output_dir_created_by_job: bool
     messages: list[str] = field(default_factory=list)
     progress: float = 0.0
     status: str = ""
@@ -82,8 +83,7 @@ def _run_generation_job(
         job.events.put(("cancelled", None))
         if job.delete_output_on_cancel:
             try:
-                if output_dir.exists():
-                    shutil.rmtree(output_dir)
+                _delete_output_dir_after_cancel(output_dir, job.output_dir_created_by_job)
             except Exception as exc:
                 job.events.put(("cleanup_error", str(exc)))
             else:
@@ -159,6 +159,16 @@ def _build_output_dir(
     return make_default_output_dir(input_path)
 
 
+def _delete_output_dir_after_cancel(output_dir: Path, output_dir_created_by_job: bool) -> None:
+    if not output_dir.exists():
+        return
+    if not output_dir_created_by_job:
+        raise RuntimeError(
+            "Папка результата существовала до запуска, поэтому автоматическое удаление отключено"
+        )
+    shutil.rmtree(output_dir)
+
+
 def _start_generation_job(
     *,
     uploaded_name: str,
@@ -170,15 +180,28 @@ def _start_generation_job(
     settings: GenerationSettings,
     delete_output_on_cancel: bool,
 ) -> GenerationJob:
+    if not uploaded_bytes:
+        raise ValueError("Загруженный файл пустой")
+
     input_temp_dir = Path(tempfile.mkdtemp(prefix="audiobook_upload_"))
-    input_path = input_temp_dir / Path(uploaded_name).name
-    input_path.write_bytes(uploaded_bytes)
-    output_dir = _build_output_dir(
-        input_path=input_path,
-        project_name=project_name,
-        output_root=output_root,
-        add_timestamp=add_timestamp,
-    )
+    try:
+        input_path = input_temp_dir / Path(uploaded_name).name
+        input_path.write_bytes(uploaded_bytes)
+        output_dir = _build_output_dir(
+            input_path=input_path,
+            project_name=project_name,
+            output_root=output_root,
+            add_timestamp=add_timestamp,
+        )
+        output_dir_created_by_job = not output_dir.exists()
+        if delete_output_on_cancel and not output_dir_created_by_job:
+            raise ValueError(
+                "Удаление результата при остановке доступно только для новой папки. "
+                "Выберите новую папку, включите дату и время или оставьте готовые главы."
+            )
+    except Exception:
+        shutil.rmtree(input_temp_dir, ignore_errors=True)
+        raise
 
     job = GenerationJob(
         thread=None,
@@ -187,6 +210,7 @@ def _start_generation_job(
         input_temp_dir=input_temp_dir,
         output_dir=output_dir,
         delete_output_on_cancel=delete_output_on_cancel,
+        output_dir_created_by_job=output_dir_created_by_job,
         status="Генерация запускается",
         messages=["Генерация запускается"],
     )
@@ -355,18 +379,22 @@ if start and uploaded is not None and not is_running:
         target_chapter_minutes=int(chapter_minutes),
         torch_threads=int(threads),
     )
-    job = _start_generation_job(
-        uploaded_name=uploaded.name,
-        uploaded_bytes=uploaded.getvalue(),
-        project_name=project_name,
-        output_root=output_root,
-        add_timestamp=add_timestamp,
-        merge=merge,
-        settings=settings,
-        delete_output_on_cancel=stop_action == "Удалить папку результата",
-    )
-    st.session_state.generation_job = job
-    is_running = True
+    try:
+        job = _start_generation_job(
+            uploaded_name=uploaded.name,
+            uploaded_bytes=uploaded.getvalue(),
+            project_name=project_name,
+            output_root=output_root,
+            add_timestamp=add_timestamp,
+            merge=merge,
+            settings=settings,
+            delete_output_on_cancel=stop_action == "Удалить папку результата",
+        )
+    except Exception as exc:
+        st.error(str(exc).strip() or type(exc).__name__)
+    else:
+        st.session_state.generation_job = job
+        is_running = True
 
 if job is not None:
     st.progress(job.progress)
