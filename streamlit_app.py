@@ -24,7 +24,7 @@ from audiobook_tts.generator import (
 )
 from audiobook_tts.settings import SAMPLE_RATES, SILERO_VOICES, GenerationSettings
 from audiobook_tts.text_utils import safe_name, split_text_for_tts
-from audiobook_tts.tts_engine import SileroTtsEngine
+from audiobook_tts.tts_engine import SileroTtsEngine, synthesize_with_length_retry
 
 
 VOICE_PREVIEW_TEXT = (
@@ -249,12 +249,14 @@ def _make_voice_preview_audio(settings: GenerationSettings) -> bytes:
             wav_file.setsampwidth(2)
             wav_file.setframerate(settings.sample_rate)
             for chunk_index, chunk in enumerate(chunks, start=1):
-                audio = engine.synthesize(
+                audio_parts = synthesize_with_length_retry(
+                    engine,
                     chunk,
                     voice=settings.voice,
                     sample_rate=settings.sample_rate,
                 )
-                wav_file.writeframes(audio_to_pcm16_bytes(audio))
+                for audio in audio_parts:
+                    wav_file.writeframes(audio_to_pcm16_bytes(audio))
                 if silence and chunk_index < len(chunks):
                     wav_file.writeframes(silence)
 

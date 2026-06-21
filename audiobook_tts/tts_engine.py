@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from .settings import SILERO_MODEL_ID
+from .text_utils import hard_split_text
 
 MODELS_YML_URL = "https://raw.githubusercontent.com/snakers4/silero-models/master/models.yml"
+MIN_TTS_RETRY_CHARS = 120
+TTS_TOO_LONG_MARKERS = (
+    "probably it's too long",
+    "size of tensor a",
+    "must match the size of tensor b",
+    "5000",
+)
 
 
 class SileroTtsEngine:
@@ -103,6 +112,57 @@ class SileroTtsEngine:
     def _load_model(self, model_path: Path):
         importer = self.torch.package.PackageImporter(str(model_path))
         return importer.load_pickle("tts_models", "model")
+
+
+def synthesize_with_length_retry(
+    engine: SileroTtsEngine,
+    text: str,
+    *,
+    voice: str,
+    sample_rate: int,
+    min_chars: int = MIN_TTS_RETRY_CHARS,
+) -> list[Any]:
+    try:
+        return [engine.synthesize(text, voice=voice, sample_rate=sample_rate)]
+    except Exception as exc:
+        if not _is_tts_too_long_error(exc) or len(text) <= min_chars:
+            raise
+
+        split_chars = max(min_chars, len(text) // 2)
+        parts = hard_split_text(text, split_chars)
+        if len(parts) <= 1:
+            raise
+
+    audio_parts: list[Any] = []
+    for part in parts:
+        audio_parts.extend(
+            synthesize_with_length_retry(
+                engine,
+                part,
+                voice=voice,
+                sample_rate=sample_rate,
+                min_chars=min_chars,
+            )
+        )
+    return audio_parts
+
+
+def _is_tts_too_long_error(exc: Exception) -> bool:
+    message = _exception_chain_text(exc).lower()
+    if TTS_TOO_LONG_MARKERS[0] in message:
+        return True
+    return all(marker in message for marker in TTS_TOO_LONG_MARKERS[1:])
+
+
+def _exception_chain_text(exc: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(str(current))
+        current = current.__cause__ or current.__context__
+    return " ".join(parts)
 
 
 def _filename_from_url(url: str) -> str:

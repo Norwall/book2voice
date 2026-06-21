@@ -24,7 +24,7 @@ from .text_utils import (
     split_text_for_tts,
     split_text_into_sentences,
 )
-from .tts_engine import SileroTtsEngine
+from .tts_engine import SileroTtsEngine, synthesize_with_length_retry
 
 ProgressCallback = Callable[["ProgressEvent"], None]
 CancelCallback = Callable[[], bool]
@@ -257,7 +257,8 @@ def _write_chapter_wav(
         for chunk_index, chunk in enumerate(chunks, start=1):
             _raise_if_cancelled(cancel_requested)
             try:
-                audio = engine.synthesize(
+                audio_parts = synthesize_with_length_retry(
+                    engine,
                     chunk,
                     voice=settings.voice,
                     sample_rate=settings.sample_rate,
@@ -270,7 +271,8 @@ def _write_chapter_wav(
                     f"chunk {chunk_index}/{len(chunks)}: {error}. "
                     f"Text: {preview!r}"
                 ) from exc
-            wav_file.writeframes(audio_to_pcm16_bytes(audio))
+            for audio in audio_parts:
+                wav_file.writeframes(audio_to_pcm16_bytes(audio))
             if silence and chunk_index < len(chunks):
                 wav_file.writeframes(silence)
 
