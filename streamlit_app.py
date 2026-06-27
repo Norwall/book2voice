@@ -9,12 +9,13 @@ import time
 import traceback
 import wave
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import streamlit as st
 
 from audiobook_tts.audio import audio_to_pcm16_bytes, convert_wav_to_mp3, silence_pcm16_bytes
+from audiobook_tts.desktop import open_folder
 from audiobook_tts.generator import (
     GenerationCancelled,
     GenerationResult,
@@ -22,21 +23,11 @@ from audiobook_tts.generator import (
     generate_audiobook,
     make_default_output_dir,
 )
+from audiobook_tts.preview import VOICE_PREVIEW_TEXT
+from audiobook_tts.progress import format_eta_ru
 from audiobook_tts.settings import SAMPLE_RATES, SILERO_VOICES, GenerationSettings
 from audiobook_tts.text_utils import safe_name, split_text_for_tts
-from audiobook_tts.tts_engine import SileroTtsEngine
-
-
-VOICE_PREVIEW_TEXT = (
-    "Глава 1. Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
-)
-
+from audiobook_tts.tts_engine import SileroTtsEngine, synthesize_with_length_retry
 
 @dataclass
 class GenerationJob:
@@ -50,6 +41,8 @@ class GenerationJob:
     messages: list[str] = field(default_factory=list)
     progress: float = 0.0
     status: str = ""
+    stage: str = "starting"
+    estimated_completion_at: datetime | None = None
     result: GenerationResult | None = None
     error: str | None = None
     error_details: str | None = None
@@ -110,20 +103,31 @@ def _drain_job_events(job: GenerationJob) -> None:
             event = payload
             if not isinstance(event, ProgressEvent):
                 continue
-            if event.total_chapters and event.chapter_index:
-                job.progress = min(event.chapter_index / event.total_chapters, 1.0)
+            if event.progress_fraction is not None:
+                job.progress = max(job.progress, min(max(event.progress_fraction, 0.0), 0.99))
             elif event.stage == "done":
                 job.progress = 1.0
+            job.stage = event.stage
+            if event.estimated_remaining_seconds is None:
+                job.estimated_completion_at = None
+            else:
+                job.estimated_completion_at = datetime.now().astimezone() + timedelta(
+                    seconds=event.estimated_remaining_seconds
+                )
             job.status = event.message
-            job.messages.append(event.message)
+            if event.stage != "chunk_done":
+                job.messages.append(event.message)
         elif event_type == "done":
             if isinstance(payload, GenerationResult):
                 job.result = payload
             job.progress = 1.0
+            job.estimated_completion_at = None
             job.done = True
         elif event_type == "cancelled":
             job.cancelled = True
             job.done = True
+            job.stage = "cancelled"
+            job.estimated_completion_at = None
             job.status = "Генерация остановлена"
             job.messages.append(job.status)
         elif event_type == "cleanup_done":
@@ -138,6 +142,8 @@ def _drain_job_events(job: GenerationJob) -> None:
             else:
                 job.error = str(payload) or "Неизвестная ошибка"
             job.done = True
+            job.stage = "error"
+            job.estimated_completion_at = None
             job.status = "Ошибка генерации"
             job.messages.append(job.status)
         elif event_type == "finished":
@@ -230,7 +236,11 @@ def _start_generation_job(
 
 def _make_voice_preview_audio(settings: GenerationSettings) -> bytes:
     settings.validate()
-    chunks = split_text_for_tts(VOICE_PREVIEW_TEXT, settings.max_chunk_chars)
+    chunks = split_text_for_tts(
+        VOICE_PREVIEW_TEXT,
+        settings.max_chunk_chars,
+        normalize_numbers=settings.normalize_numbers,
+    )
     if not chunks:
         raise ValueError("Не удалось подготовить текст примера голоса")
 
@@ -249,12 +259,14 @@ def _make_voice_preview_audio(settings: GenerationSettings) -> bytes:
             wav_file.setsampwidth(2)
             wav_file.setframerate(settings.sample_rate)
             for chunk_index, chunk in enumerate(chunks, start=1):
-                audio = engine.synthesize(
+                audio_parts = synthesize_with_length_retry(
+                    engine,
                     chunk,
                     voice=settings.voice,
                     sample_rate=settings.sample_rate,
                 )
-                wav_file.writeframes(audio_to_pcm16_bytes(audio))
+                for audio in audio_parts:
+                    wav_file.writeframes(audio_to_pcm16_bytes(audio))
                 if silence and chunk_index < len(chunks):
                     wav_file.writeframes(silence)
 
@@ -298,6 +310,12 @@ with st.sidebar:
     speed = st.slider("Скорость", 0.7, 2.0, 1.0, 0.05, disabled=is_running)
     pause_ms = st.slider("Пауза между фрагментами, мс", 0, 1500, 150, 50, disabled=is_running)
     chunk_chars = st.slider("Размер фрагмента TTS, символы", 400, 1500, 850, 50, disabled=is_running)
+    normalize_numbers = st.checkbox(
+        "Озвучивать числа",
+        value=True,
+        disabled=is_running,
+        help="Преобразовывать числа, даты, время и другие числовые записи в слова перед Silero.",
+    )
     preview = st.button("Прослушать пример голоса", disabled=is_running)
     preview_output = st.empty()
     chapter_minutes = st.number_input(
@@ -316,6 +334,7 @@ with st.sidebar:
         pause_ms=int(pause_ms),
         speech_speed=float(speed),
         torch_threads=int(threads),
+        normalize_numbers=normalize_numbers,
     )
     preview_signature = (
         preview_settings.voice,
@@ -324,6 +343,7 @@ with st.sidebar:
         preview_settings.pause_ms,
         preview_settings.speech_speed,
         preview_settings.torch_threads,
+        preview_settings.normalize_numbers,
     )
     with preview_output:
         if preview:
@@ -353,19 +373,33 @@ project_name = st.text_input("Имя папки результата", value=def
 output_root = st.text_input("Корневая папка", value=str(Path.cwd() / "outputs"), disabled=is_running)
 add_timestamp = st.checkbox("Добавить дату и время к папке", value=True, disabled=is_running)
 
-left, right = st.columns([1, 2])
+left, middle, right = st.columns([1, 1, 2])
 with left:
     start = st.button("Сгенерировать", disabled=uploaded is None or is_running, type="primary")
-with right:
+with middle:
     stop = st.button(
         "Стоп",
         disabled=not is_running or job is None or job.stop_requested,
         type="secondary",
     )
+with right:
+    open_output_folder = st.button(
+        "Открыть папку с книгой",
+        disabled=job is None or not job.output_dir.is_dir(),
+        type="secondary",
+    )
+
+if open_output_folder and job is not None:
+    try:
+        open_folder(job.output_dir)
+    except (OSError, RuntimeError) as exc:
+        st.error(str(exc).strip() or type(exc).__name__)
 
 if stop and job is not None:
     job.cancel_event.set()
     job.stop_requested = True
+    job.stage = "stopping"
+    job.estimated_completion_at = None
     job.status = "Остановка запрошена. Текущий фрагмент будет завершен."
     job.messages.append(job.status)
 
@@ -378,6 +412,7 @@ if start and uploaded is not None and not is_running:
         speech_speed=float(speed),
         target_chapter_minutes=int(chapter_minutes),
         torch_threads=int(threads),
+        normalize_numbers=normalize_numbers,
     )
     try:
         job = _start_generation_job(
@@ -399,6 +434,18 @@ if start and uploaded is not None and not is_running:
 if job is not None:
     st.progress(job.progress)
     st.write(job.status)
+    if is_running and not job.stop_requested:
+        if job.estimated_completion_at is not None:
+            now = datetime.now().astimezone()
+            remaining_seconds = max(
+                0.0,
+                (job.estimated_completion_at - now).total_seconds(),
+            )
+            st.caption(format_eta_ru(remaining_seconds, now=now))
+        elif job.stage == "merge":
+            st.caption("Финальная сборка книги...")
+        else:
+            st.caption("Оценка времени появится после первого фрагмента")
     if job.messages:
         st.text("\n".join(job.messages[-8:]))
 

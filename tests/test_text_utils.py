@@ -15,7 +15,19 @@ from audiobook_tts.text_utils import (
     prepare_text_for_tts,
     split_text_for_tts,
 )
-from audiobook_tts.tts_engine import SileroTtsEngine
+from audiobook_tts.tts_engine import SileroTtsEngine, synthesize_with_length_retry
+
+
+class _FakeTtsEngine:
+    def __init__(self, failures: list[Exception] | None = None):
+        self.failures = list(failures or [])
+        self.calls: list[tuple[str, str, int]] = []
+
+    def synthesize(self, text: str, *, voice: str, sample_rate: int) -> str:
+        self.calls.append((text, voice, sample_rate))
+        if self.failures:
+            raise self.failures.pop(0)
+        return f"audio:{text}"
 
 
 class TextUtilsTests(unittest.TestCase):
@@ -86,6 +98,55 @@ class TextUtilsTests(unittest.TestCase):
         ]
 
         self.assertEqual(bad_chunks, [])
+
+
+class TtsLengthRetryTests(unittest.TestCase):
+    def test_too_long_tts_error_splits_chunk_and_retries_in_order(self) -> None:
+        text = " ".join(f"word{i:02d}" for i in range(80))
+        engine = _FakeTtsEngine(
+            [Exception("Model couldn't generate your text, probably it's too long")]
+        )
+
+        audio = synthesize_with_length_retry(
+            engine,
+            text,
+            voice="baya",
+            sample_rate=24000,
+        )
+
+        retry_texts = [call[0] for call in engine.calls[1:]]
+        self.assertGreater(len(retry_texts), 1)
+        self.assertEqual(audio, [f"audio:{part}" for part in retry_texts])
+        self.assertEqual(" ".join(retry_texts), text)
+        self.assertTrue(all(len(part) < len(text) for part in retry_texts))
+
+    def test_non_length_tts_error_is_not_retried(self) -> None:
+        engine = _FakeTtsEngine([RuntimeError("cache broken")])
+
+        with self.assertRaisesRegex(RuntimeError, "cache broken"):
+            synthesize_with_length_retry(
+                engine,
+                "short text",
+                voice="baya",
+                sample_rate=24000,
+            )
+
+        self.assertEqual([call[0] for call in engine.calls], ["short text"])
+
+    def test_too_long_tts_error_below_minimum_size_is_not_retried(self) -> None:
+        engine = _FakeTtsEngine(
+            [Exception("Model couldn't generate your text, probably it's too long")]
+        )
+
+        with self.assertRaisesRegex(Exception, "probably it's too long"):
+            synthesize_with_length_retry(
+                engine,
+                "short text",
+                voice="baya",
+                sample_rate=24000,
+            )
+
+        self.assertEqual([call[0] for call in engine.calls], ["short text"])
 
 
 class SileroCacheRecoveryTests(unittest.TestCase):

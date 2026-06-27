@@ -18,6 +18,7 @@ class GenerationSettings:
     mp3_bitrate: str = "128k"
     torch_threads: int = 4
     model_id: str = SILERO_MODEL_ID
+    normalize_numbers: bool = True
 
     def validate(self) -> None:
         if self.voice not in SILERO_VOICES:

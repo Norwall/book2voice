@@ -26,6 +26,12 @@ def main() -> int:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--threads", type=int, default=4, help="Torch CPU threads")
+    parser.add_argument(
+        "--normalize-numbers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Expand numbers into Russian words before synthesis (default: enabled)",
+    )
     args = parser.parse_args()
 
     settings = GenerationSettings(
@@ -36,13 +42,26 @@ def main() -> int:
         speech_speed=args.speed,
         target_chapter_minutes=args.chapter_minutes,
         torch_threads=args.threads,
+        normalize_numbers=args.normalize_numbers,
     )
 
     def progress(event: ProgressEvent) -> None:
+        if event.stage == "chunk_done":
+            return
         prefix = ""
         if event.chapter_index and event.total_chapters:
             prefix = f"[{event.chapter_index:03d}/{event.total_chapters:03d}] "
-        print(f"{prefix}{event.message}")
+        suffix = ""
+        if event.stage == "chapter_done" and event.estimated_remaining_seconds is not None:
+            remaining_minutes = max(1, round(event.estimated_remaining_seconds / 60))
+            hours, minutes = divmod(remaining_minutes, 60)
+            if hours and minutes:
+                suffix = f" (about {hours}h {minutes}m remaining)"
+            elif hours:
+                suffix = f" (about {hours}h remaining)"
+            else:
+                suffix = f" (about {minutes}m remaining)"
+        print(f"{prefix}{event.message}{suffix}")
 
     try:
         result = generate_audiobook(

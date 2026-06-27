@@ -4,6 +4,8 @@ import re
 import unicodedata
 from pathlib import Path
 
+from .number_normalizer import normalize_numbers_for_tts
+
 WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?…])\s+")
 SAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
@@ -63,8 +65,10 @@ def clean_text(text: str) -> str:
     return "\n\n".join(lines).strip()
 
 
-def prepare_text_for_tts(text: str) -> str:
+def prepare_text_for_tts(text: str, *, normalize_numbers: bool = True) -> str:
     text = UNICODE_SPACE_RE.sub(" ", text.translate(TTS_TRANSLATION))
+    if normalize_numbers:
+        text = normalize_numbers_for_tts(text)
     text = "".join(_tts_safe_char(char) for char in text)
     text = TTS_DECORATION_RE.sub(" ", text)
     return clean_text(text)
@@ -133,8 +137,13 @@ def default_title_from_path(path: Path) -> str:
     return safe_name(path.stem, default="book")
 
 
-def split_text_for_tts(text: str, max_chars: int) -> list[str]:
-    text = prepare_text_for_tts(text)
+def split_text_for_tts(
+    text: str,
+    max_chars: int,
+    *,
+    normalize_numbers: bool = True,
+) -> list[str]:
+    text = prepare_text_for_tts(text, normalize_numbers=normalize_numbers)
     if not text:
         return []
 
@@ -174,7 +183,9 @@ def split_text_for_tts(text: str, max_chars: int) -> list[str]:
     return _merge_nonverbal_tts_chunks(chunks, max_chars)
 
 
-def split_text_into_sentences(text: str) -> list[str]:
+def split_text_into_sentences(text: str, *, normalize_numbers: bool = True) -> list[str]:
+    if normalize_numbers:
+        text = normalize_numbers_for_tts(text)
     text = clean_text(text)
     if not text:
         return []
@@ -222,8 +233,13 @@ def estimate_tts_seconds(
     max_chunk_chars: int,
     pause_ms: int,
     speech_speed: float,
+    normalize_numbers: bool = True,
 ) -> float:
-    chunks = split_text_for_tts(text, max_chunk_chars)
+    chunks = split_text_for_tts(
+        text,
+        max_chunk_chars,
+        normalize_numbers=normalize_numbers,
+    )
     if not chunks:
         return 0.0
 
