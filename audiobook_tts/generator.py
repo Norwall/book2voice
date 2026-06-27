@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import time
 import unicodedata
 import wave
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from .audio import (
     silence_pcm16_bytes,
 )
 from .book_parser import Chapter, parse_book
+from .progress import GenerationTiming
 from .settings import GenerationSettings
 from .text_utils import (
     default_title_from_path,
@@ -28,6 +30,7 @@ from .tts_engine import SileroTtsEngine, synthesize_with_length_retry
 
 ProgressCallback = Callable[["ProgressEvent"], None]
 CancelCallback = Callable[[], bool]
+ChunkProgressCallback = Callable[[str, float, int, int], None]
 WHITESPACE_PREVIEW_RE = re.compile(r"[ \t\r\n\f\v]+")
 GENERATED_CHAPTER_FILE_RE = re.compile(r"^\d{3}\.mp3$")
 
@@ -43,6 +46,8 @@ class ProgressEvent:
     chapter_index: int | None = None
     total_chapters: int | None = None
     output_path: Path | None = None
+    progress_fraction: float | None = None
+    estimated_remaining_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,16 @@ def generate_audiobook(
     chapters = _split_chapters_by_target_duration(source_chapters, settings)
     if len(chapters) > 999:
         raise ValueError("The book has more than 999 chapters; numeric filenames would overflow")
+    chapter_chunks = [
+        split_text_for_tts(chapter.text, settings.max_chunk_chars)
+        for chapter in chapters
+    ]
+    for chapter, chunks in zip(chapters, chapter_chunks):
+        if not chunks:
+            raise ValueError(f"Chapter {chapter.index} has no text after cleanup")
+    timing = GenerationTiming(
+        total_chars=sum(len(chunk) for chunks in chapter_chunks for chunk in chunks)
+    )
 
     target_dir = output_dir or make_default_output_dir(input_path, parsed.title)
     _ensure_output_dir_available(target_dir)
@@ -96,7 +111,10 @@ def generate_audiobook(
 
         with tempfile.TemporaryDirectory(prefix="_audiobook_", dir=str(target_dir)) as temp_dir:
             temp_path = Path(temp_dir)
-            for index, chapter in enumerate(chapters, start=1):
+            for index, (chapter, chunks) in enumerate(
+                zip(chapters, chapter_chunks),
+                start=1,
+            ):
                 _raise_if_cancelled(cancel_requested)
                 output_mp3 = target_dir / f"{index:03d}.mp3"
                 output_wav = temp_path / f"{index:03d}.wav"
@@ -106,20 +124,50 @@ def generate_audiobook(
                     f"Generating {index:03d}: {chapter.title}",
                     chapter_index=index,
                     total_chapters=len(chapters),
+                    progress_fraction=timing.progress_fraction,
+                    estimated_remaining_seconds=timing.estimated_remaining_seconds,
                 )
+
+                def on_chunk_done(
+                    chunk: str,
+                    elapsed_seconds: float,
+                    chunk_index: int,
+                    total_chunks: int,
+                ) -> None:
+                    timing.record_synthesis(len(chunk), elapsed_seconds)
+                    _emit(
+                        progress,
+                        "chunk_done",
+                        (
+                            f"Generating {index:03d}: {chapter.title} "
+                            f"(fragment {chunk_index}/{total_chunks})"
+                        ),
+                        chapter_index=index,
+                        total_chapters=len(chapters),
+                        progress_fraction=timing.progress_fraction,
+                        estimated_remaining_seconds=timing.estimated_remaining_seconds,
+                    )
+
                 _write_chapter_wav(
                     engine,
                     chapter,
                     output_wav,
                     settings,
+                    chunks=chunks,
+                    chunk_completed=on_chunk_done,
                     cancel_requested=cancel_requested,
                 )
                 _raise_if_cancelled(cancel_requested)
+                encoding_started = time.monotonic()
                 convert_wav_to_mp3(
                     output_wav,
                     output_mp3,
                     bitrate=settings.mp3_bitrate,
                     speed=settings.speech_speed,
+                )
+                timing.record_encoding(
+                    sum(len(chunk) for chunk in chunks),
+                    time.monotonic() - encoding_started,
                 )
                 chapter_files.append(output_mp3)
                 _emit(
@@ -129,6 +177,8 @@ def generate_audiobook(
                     chapter_index=index,
                     total_chapters=len(chapters),
                     output_path=output_mp3,
+                    progress_fraction=timing.progress_fraction,
+                    estimated_remaining_seconds=timing.estimated_remaining_seconds,
                 )
 
         if merge:
@@ -243,9 +293,11 @@ def _write_chapter_wav(
     wav_path: Path,
     settings: GenerationSettings,
     *,
+    chunks: list[str] | None = None,
+    chunk_completed: ChunkProgressCallback | None = None,
     cancel_requested: CancelCallback | None = None,
 ) -> None:
-    chunks = split_text_for_tts(chapter.text, settings.max_chunk_chars)
+    chunks = chunks or split_text_for_tts(chapter.text, settings.max_chunk_chars)
     if not chunks:
         raise ValueError(f"Chapter {chapter.index} has no text after cleanup")
 
@@ -256,6 +308,7 @@ def _write_chapter_wav(
         wav_file.setframerate(settings.sample_rate)
         for chunk_index, chunk in enumerate(chunks, start=1):
             _raise_if_cancelled(cancel_requested)
+            chunk_started = time.monotonic()
             try:
                 audio_parts = synthesize_with_length_retry(
                     engine,
@@ -275,6 +328,13 @@ def _write_chapter_wav(
                 wav_file.writeframes(audio_to_pcm16_bytes(audio))
             if silence and chunk_index < len(chunks):
                 wav_file.writeframes(silence)
+            if chunk_completed:
+                chunk_completed(
+                    chunk,
+                    time.monotonic() - chunk_started,
+                    chunk_index,
+                    len(chunks),
+                )
 
 
 def _visible_error_preview(text: str, max_chars: int = 160) -> str:
@@ -301,6 +361,8 @@ def _emit(
     chapter_index: int | None = None,
     total_chapters: int | None = None,
     output_path: Path | None = None,
+    progress_fraction: float | None = None,
+    estimated_remaining_seconds: float | None = None,
 ) -> None:
     if progress:
         progress(
@@ -310,5 +372,7 @@ def _emit(
                 chapter_index=chapter_index,
                 total_chapters=total_chapters,
                 output_path=output_path,
+                progress_fraction=progress_fraction,
+                estimated_remaining_seconds=estimated_remaining_seconds,
             )
         )
