@@ -87,6 +87,17 @@ def parse_epub(path: Path) -> ParsedBook:
         soup = BeautifulSoup(item.get_content(), "lxml")
         for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
             tag.decompose()
+        for link in soup.find_all("a"):
+            epub_type = str(link.get("epub:type") or link.get("type") or "").lower()
+            role = str(link.get("role") or "").lower()
+            href = str(link.get("href") or "")
+            label = link.get_text(" ", strip=True)
+            if (
+                "noteref" in epub_type.split()
+                or role == "doc-noteref"
+                or (href.startswith("#") and re.fullmatch(r"\[\d+\]", label))
+            ):
+                link.decompose()
 
         heading = soup.find(["h1", "h2", "h3"])
         chapter_title = heading.get_text(" ", strip=True) if heading else item.get_name()
@@ -200,7 +211,7 @@ def _fb2_text_blocks(element: ET.Element) -> list[str]:
     if tag in ignored_tags:
         return []
     if tag in block_tags:
-        text = _fb2_element_text(element)
+        text = _fb2_element_text(element, skip_note_refs=True)
         return [text] if text else []
 
     blocks: list[str] = []
@@ -217,10 +228,32 @@ def _fb2_text_blocks(element: ET.Element) -> list[str]:
     return blocks
 
 
-def _fb2_element_text(element: ET.Element | None) -> str:
+def _fb2_element_text(
+    element: ET.Element | None,
+    *,
+    skip_note_refs: bool = False,
+) -> str:
     if element is None:
         return ""
-    return clean_text(" ".join(part.strip() for part in element.itertext() if part.strip()))
+
+    parts: list[str] = []
+
+    def collect(current: ET.Element) -> None:
+        if current.text and current.text.strip():
+            parts.append(current.text.strip())
+        for child in list(current):
+            is_note_ref = (
+                skip_note_refs
+                and _local_name(child.tag) == "a"
+                and child.attrib.get("type", "").lower() == "note"
+            )
+            if not is_note_ref:
+                collect(child)
+            if child.tail and child.tail.strip():
+                parts.append(child.tail.strip())
+
+    collect(element)
+    return clean_text(" ".join(parts))
 
 
 def _first_child(element: ET.Element | None, name: str) -> ET.Element | None:

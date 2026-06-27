@@ -77,7 +77,11 @@ def generate_audiobook(
     if len(chapters) > 999:
         raise ValueError("The book has more than 999 chapters; numeric filenames would overflow")
     chapter_chunks = [
-        split_text_for_tts(chapter.text, settings.max_chunk_chars)
+        split_text_for_tts(
+            chapter.text,
+            settings.max_chunk_chars,
+            normalize_numbers=settings.normalize_numbers,
+        )
         for chapter in chapters
     ]
     for chapter, chunks in zip(chapters, chapter_chunks):
@@ -264,13 +268,17 @@ def _split_chapters_by_target_duration(
         current_title = ""
 
     for source_chapter in source_chapters:
-        for sentence in split_text_into_sentences(source_chapter.text):
+        for sentence in split_text_into_sentences(
+            source_chapter.text,
+            normalize_numbers=settings.normalize_numbers,
+        ):
             candidate_text = f"{current_text} {sentence}".strip() if current_text else sentence
             candidate_seconds = estimate_tts_seconds(
                 candidate_text,
                 max_chunk_chars=settings.max_chunk_chars,
                 pause_ms=settings.pause_ms,
                 speech_speed=settings.speech_speed,
+                normalize_numbers=settings.normalize_numbers,
             )
             if current_sentences and candidate_seconds > target_seconds:
                 append_current()
@@ -297,7 +305,11 @@ def _write_chapter_wav(
     chunk_completed: ChunkProgressCallback | None = None,
     cancel_requested: CancelCallback | None = None,
 ) -> None:
-    chunks = chunks or split_text_for_tts(chapter.text, settings.max_chunk_chars)
+    chunks = chunks or split_text_for_tts(
+        chapter.text,
+        settings.max_chunk_chars,
+        normalize_numbers=settings.normalize_numbers,
+    )
     if not chunks:
         raise ValueError(f"Chapter {chapter.index} has no text after cleanup")
 

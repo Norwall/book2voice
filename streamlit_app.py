@@ -23,22 +23,11 @@ from audiobook_tts.generator import (
     generate_audiobook,
     make_default_output_dir,
 )
+from audiobook_tts.preview import VOICE_PREVIEW_TEXT
 from audiobook_tts.progress import format_eta_ru
 from audiobook_tts.settings import SAMPLE_RATES, SILERO_VOICES, GenerationSettings
 from audiobook_tts.text_utils import safe_name, split_text_for_tts
 from audiobook_tts.tts_engine import SileroTtsEngine, synthesize_with_length_retry
-
-
-VOICE_PREVIEW_TEXT = (
-    "Глава 1. Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает. "
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
-    "Это короткая проверка локальной озвучки. Если файл создался, пайплайн работает."
-)
-
 
 @dataclass
 class GenerationJob:
@@ -247,7 +236,11 @@ def _start_generation_job(
 
 def _make_voice_preview_audio(settings: GenerationSettings) -> bytes:
     settings.validate()
-    chunks = split_text_for_tts(VOICE_PREVIEW_TEXT, settings.max_chunk_chars)
+    chunks = split_text_for_tts(
+        VOICE_PREVIEW_TEXT,
+        settings.max_chunk_chars,
+        normalize_numbers=settings.normalize_numbers,
+    )
     if not chunks:
         raise ValueError("Не удалось подготовить текст примера голоса")
 
@@ -317,6 +310,12 @@ with st.sidebar:
     speed = st.slider("Скорость", 0.7, 2.0, 1.0, 0.05, disabled=is_running)
     pause_ms = st.slider("Пауза между фрагментами, мс", 0, 1500, 150, 50, disabled=is_running)
     chunk_chars = st.slider("Размер фрагмента TTS, символы", 400, 1500, 850, 50, disabled=is_running)
+    normalize_numbers = st.checkbox(
+        "Озвучивать числа",
+        value=True,
+        disabled=is_running,
+        help="Преобразовывать числа, даты, время и другие числовые записи в слова перед Silero.",
+    )
     preview = st.button("Прослушать пример голоса", disabled=is_running)
     preview_output = st.empty()
     chapter_minutes = st.number_input(
@@ -335,6 +334,7 @@ with st.sidebar:
         pause_ms=int(pause_ms),
         speech_speed=float(speed),
         torch_threads=int(threads),
+        normalize_numbers=normalize_numbers,
     )
     preview_signature = (
         preview_settings.voice,
@@ -343,6 +343,7 @@ with st.sidebar:
         preview_settings.pause_ms,
         preview_settings.speech_speed,
         preview_settings.torch_threads,
+        preview_settings.normalize_numbers,
     )
     with preview_output:
         if preview:
@@ -411,6 +412,7 @@ if start and uploaded is not None and not is_running:
         speech_speed=float(speed),
         target_chapter_minutes=int(chapter_minutes),
         torch_threads=int(threads),
+        normalize_numbers=normalize_numbers,
     )
     try:
         job = _start_generation_job(

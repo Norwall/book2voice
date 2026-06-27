@@ -26,6 +26,12 @@ def main() -> int:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--threads", type=int, default=4, help="Torch CPU threads")
+    parser.add_argument(
+        "--normalize-numbers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Expand numbers into Russian words before synthesis (default: enabled)",
+    )
     args = parser.parse_args()
 
     settings = GenerationSettings(
@@ -36,6 +42,7 @@ def main() -> int:
         speech_speed=args.speed,
         target_chapter_minutes=args.chapter_minutes,
         torch_threads=args.threads,
+        normalize_numbers=args.normalize_numbers,
     )
 
     def progress(event: ProgressEvent) -> None:

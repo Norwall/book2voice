@@ -6,3 +6,4 @@ beautifulsoup4
 lxml
 numpy
 imageio-ffmpeg
+num2words==0.5.14
